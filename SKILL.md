@@ -1,6 +1,6 @@
 ---
-name: 转书skill
-description: 把视频/链接转成可阅读的文档（markdown + EPUB），存到本机 Downloads，并自动复制到 ~/同步空间macmini/readify待上传/ 文件夹。用于用户发来 YouTube 等视频链接并说「转书」「转成文档」「存为 epub」「转书skill」等。流程：判断有无字幕→有字幕直接抓取（优先中文，只有英文则翻译成简体）→无字幕则本地 Whisper 转写→人工校对整理成 markdown→转成 EPUB 存到 ~/Downloads 并复制到 readify待上传/。readify.ai 书架需用户手动登录上传（无法自动化），故用待上传文件夹汇总。
+name: video-to-book
+description: 把视频/链接转成可阅读的文档（markdown + EPUB），存到本机 Downloads，并自动复制到 ~/同步空间macmini/readify待上传/ 文件夹。用于用户发来 YouTube 等视频链接并说「转书」「转成文档」「存为 epub」「转书skill」「video to book」等。流程：判断有无字幕→有字幕直接抓取（优先中文，只有英文则翻译成简体）→无字幕则本地 Whisper 转写→人工校对整理成 markdown→转成 EPUB 存到 ~/Downloads 并复制到 readify待上传/。readify.ai 书架需用户手动登录上传（无法自动化），故用待上传文件夹汇总。
 ---
 
 # 转书 skill
