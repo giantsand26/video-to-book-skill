@@ -1,6 +1,8 @@
-# 转书 skill
+# video-to-book（转书）
 
 把视频/链接转成可阅读的文档（markdown + EPUB），存到本机 Downloads，并自动复制到 readify 待上传文件夹。
+
+兼容 **Claude Code** 与 **Codex**（遵循 Agent Skills 开放标准）。
 
 ## 功能
 
@@ -8,6 +10,22 @@
 - 人工校对整理成 markdown（分章节 + YAML frontmatter）
 - 转成标准 EPUB3（含目录 nav + toc.ncx）
 - 归档到 `~/同步空间macmini/readify待上传/`，便于拖入 readify.ai 书架
+
+## 安装
+
+### Claude Code
+
+```bash
+mkdir -p ~/.claude/skills
+git clone https://github.com/giantsand26/video-to-book-skill.git ~/.claude/skills/video-to-book
+```
+
+### Codex
+
+```bash
+mkdir -p ~/.codex/skills
+git clone https://github.com/giantsand26/video-to-book-skill.git ~/.codex/skills/video-to-book
+```
 
 ## 目录结构
 
