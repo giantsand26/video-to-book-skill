@@ -40,10 +40,9 @@ description: 把视频/链接转成可阅读的文档（markdown + EPUB），存
 4. **分组**（可选，需时间戳时）：`scripts/group.py <transcript.json> <grouped.txt>`，按句末标点 + 字数分段、加 `[MM:SS]` 时间戳。
 5. **整理成 markdown（忠实翻译，不转述）**：英文/混合语言部分用 `scripts/translate.py` 分块翻译（把翻译从 agent 上下文剥离、省 token），中文部分保留原文；翻译后再按下方「翻译与整理原则」补 frontmatter、说话人标注、`##` 分节、结尾版权声明：
    ```
-   export ANTHROPIC_API_KEY=...   # 走中转时再加 export ANTHROPIC_BASE_URL=...
-   python3 scripts/translate.py <transcript.json|grouped.txt> <输出.md> [model] [base_url]
+   python3 scripts/translate.py <transcript.json|grouped.txt> <输出.md>
    ```
-   默认模型 `claude-haiku-4-5`，块与块独立翻译、流式写文件、断点续传；纯中文视频无需翻译，直接对转写结果做轻量清洗即可。
+   模型与通道自动跟随 Claude Code 环境变量（`ANTHROPIC_DEFAULT_HAIKU_MODEL` / `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`），无需手动指定；块与块独立翻译、流式写文件、断点续传；纯中文视频无需翻译，直接对转写结果做轻量清洗即可。
 6. **转 EPUB**：`python3 scripts/md2epub.py <md路径> <输出.epub>`，输出到 `~/Downloads`。
 7. **归档到 readify 待上传文件夹**：`mkdir -p ~/同步空间/readify待上传 && cp "<输出.epub>" ~/同步空间/readify待上传/`，把新生成的 EPUB 复制进去，便于用户一次性拖入 readify.ai 书架。
 8. **readify.ai 书架**：提示用户手动登录 `https://app.readifyai.com/library` 上传（需登录，无法自动化）；上传时可整批从 `~/同步空间/readify待上传/` 拖入。
@@ -61,7 +60,7 @@ description: 把视频/链接转成可阅读的文档（markdown + EPUB），存
 ## 脚本（本 skill 的 scripts/ 目录下）
 
 - `transcribe.py <audio.mp3> <transcript.json> [language]` —— faster-whisper small / int8 / beam5 / vad；第三个参数指定语言，缺省 `zh`（中文带简体断句提示词），传 `en` 等其他语言码则按该语言转写。
-- `translate.py <transcript.json|grouped.txt> <输出.md> [model] [base_url]` —— 分块忠实翻译为简体中文（默认 `claude-haiku-4-5`，块间不共享上下文、流式写文件、断点续传、失败切半重试），把翻译从 agent 上下文剥离以省 token。读 `ANTHROPIC_API_KEY`（可选 `ANTHROPIC_BASE_URL`），`CHUNK_CHARS` 控制单块字符数。
+- `translate.py <transcript.json|grouped.txt> <输出.md> [model] [base_url]` —— 分块忠实翻译为简体中文（模型/通道自动跟随环境变量，块间不共享上下文、流式写文件、断点续传、失败切半重试、剥离国旗 emoji 规避内容风控），把翻译从 agent 上下文剥离以省 token。读 `ANTHROPIC_AUTH_TOKEN`（或 `ANTHROPIC_API_KEY`）、`ANTHROPIC_DEFAULT_HAIKU_MODEL`、`ANTHROPIC_BASE_URL`；`CHUNK_CHARS` 控制单块字符数。
 - `group.py <transcript.json> <grouped.txt>` —— 分段 + 时间戳。
 - `md2epub.py <md路径> <epub路径>` —— 标准 EPUB3（含目录 nav + toc.ncx），按 `##` 分章，`## 视频信息` 表格并入封面页。
 

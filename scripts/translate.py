@@ -3,7 +3,7 @@
 """
 translate.py — 分块翻译视频转写为简体中文 markdown（忠实翻译，不转述）
 
-把「翻译」从 agent 上下文里剥离，直接调 Anthropic API 分块翻译：
+把「翻译」从 agent 上下文里剥离，直接调 API 分块翻译：
 块与块互不共享上下文，译文流式追加写文件，从根本上省 token。
 
 用法:
@@ -12,33 +12,32 @@ translate.py — 分块翻译视频转写为简体中文 markdown（忠实翻译
     transcript.json : faster-whisper 输出（[{"start","end","text"}...]）
     grouped.txt     : group.py 输出（带 [MM:SS] 前缀，时间戳会被剥离）
 
-环境变量:
-    ANTHROPIC_API_KEY    必需
-    ANTHROPIC_BASE_URL   可选，默认官方 https://api.anthropic.com
-    CHUNK_CHARS          可选，单块字符数，默认 2500
+模型与通道自动跟随 Claude Code 环境变量（不写死版本）:
+    ANTHROPIC_DEFAULT_HAIKU_MODEL  优先用作翻译模型（如 deepseek-v4-flash）
+    ANTHROPIC_MODEL                备用模型
+    ANTHROPIC_BASE_URL             API 通道（如 https://api.deepseek.com/anthropic）
+    ANTHROPIC_AUTH_TOKEN           Bearer 认证（DeepSeek 等兼容接口）
+    ANTHROPIC_API_KEY              x-api-key 认证（Anthropic 官方）
+    CHUNK_CHARS                    可选，单块字符数，默认 2500
 
-示例:
-    ANTHROPIC_API_KEY=sk-xxx python3 translate.py transcript.json book.md
-    python3 translate.py transcript.json book.md claude-haiku-4-5 https://my-relay.com
+    model / base_url 也可用命令行参数显式覆盖。
 
 特性:
     - 断点续传：中途报错/中断，重跑会从上次完成处继续
     - 自动重试：单块失败先切半再试，仍失败则打印 request_id 并中止
+    - 自动剥离国旗 emoji：规避 DeepSeek 的「Content Exists Risk」字形级风控
 """
 
 import json
 import os
 import re
 import sys
-import time
 import urllib.request
 import urllib.error
 
 # ---------------------------------------------------------------------------
 # 配置
 # ---------------------------------------------------------------------------
-DEFAULT_MODEL = "claude-haiku-4-5"
-DEFAULT_BASE_URL = "https://api.anthropic.com"
 CHUNK_CHARS = int(os.environ.get("CHUNK_CHARS", "2500"))
 MAX_TOKENS = 4096
 API_VERSION = "2023-06-01"
@@ -51,6 +50,14 @@ SYSTEM_PROMPT = (
     "- 修正明显的专名误译（如品牌名、人名），但不得增删原意\n"
     "- 直接输出翻译结果，不要解释、不要加任何说明、不要输出原文"
 )
+
+
+# ---------------------------------------------------------------------------
+# 剥离国旗 emoji（region indicator symbols U+1F1E6..U+1F1FF）
+# DeepSeek 的内容风控按「字形」匹配，国旗符号是最常见触发点，翻译前先剥离。
+# ---------------------------------------------------------------------------
+def strip_flags(text):
+    return re.sub(r"[\U0001F1E6-\U0001F1FF]", "", text)
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +76,6 @@ def load_text(path):
 # 切块：按句子边界切，尽量接近 CHUNK_CHARS 而不切断句子
 # ---------------------------------------------------------------------------
 def split_chunks(text):
-    # 先按句末标点切开成句子
     sentences = re.findall(r".*?[。！？!?]|.+$", text, flags=re.S)
     chunks, cur = [], ""
     for s in sentences:
@@ -84,9 +90,9 @@ def split_chunks(text):
 
 
 # ---------------------------------------------------------------------------
-# API 调用（urllib 直连，零依赖，支持中转 base_url）
+# API 调用（urllib 直连，零依赖，模型/通道均由环境变量决定）
 # ---------------------------------------------------------------------------
-def call_api(text, model, base_url, api_key):
+def call_api(text, model, base_url, auth_headers):
     endpoint = base_url.rstrip("/") + "/v1/messages"
     payload = {
         "model": model,
@@ -94,14 +100,15 @@ def call_api(text, model, base_url, api_key):
         "system": SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": text}],
     }
+    headers = {
+        "anthropic-version": API_VERSION,
+        "content-type": "application/json",
+    }
+    headers.update(auth_headers)
     req = urllib.request.Request(
         endpoint,
         data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": API_VERSION,
-            "content-type": "application/json",
-        },
+        headers=headers,
     )
     with urllib.request.urlopen(req, timeout=600) as resp:
         data = json.loads(resp.read().decode("utf-8"))
@@ -111,9 +118,9 @@ def call_api(text, model, base_url, api_key):
 # ---------------------------------------------------------------------------
 # 带重试的翻译：失败先把块切半，仍失败抛出带 request_id 的错误
 # ---------------------------------------------------------------------------
-def translate_chunk(text, model, base_url, api_key, depth=0):
+def translate_chunk(text, model, base_url, auth_headers, depth=0):
     try:
-        return call_api(text, model, base_url, api_key)
+        return call_api(text, model, base_url, auth_headers)
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", "ignore")
         rid = ""
@@ -121,11 +128,11 @@ def translate_chunk(text, model, base_url, api_key, depth=0):
             rid = json.loads(body)["error"].get("request_id", "")
         except Exception:
             pass
-        # 块还够切半，且没切太多次 → 切半重试（应对单块过大）
+        # 块还够切半，且没切太多次 → 切半重试（应对单块过大 / 单块命中风控）
         if len(text) > 400 and depth < 3:
             half = len(text) // 2
-            a = translate_chunk(text[:half], model, base_url, api_key, depth + 1)
-            b = translate_chunk(text[half:], model, base_url, api_key, depth + 1)
+            a = translate_chunk(text[:half], model, base_url, auth_headers, depth + 1)
+            b = translate_chunk(text[half:], model, base_url, auth_headers, depth + 1)
             return a + b
         raise RuntimeError(
             f"翻译失败 HTTP {e.code}: {body} (request_id: {rid})"
@@ -141,19 +148,37 @@ def main():
         sys.exit(1)
 
     src, out = sys.argv[1], sys.argv[2]
-    model = sys.argv[3] if len(sys.argv) > 3 else DEFAULT_MODEL
-    base_url = sys.argv[4] if len(sys.argv) > 4 else os.environ.get(
-        "ANTHROPIC_BASE_URL", DEFAULT_BASE_URL
+
+    # 模型：命令行 > ANTHROPIC_DEFAULT_HAIKU_MODEL > ANTHROPIC_MODEL
+    model = sys.argv[3] if len(sys.argv) > 3 else (
+        os.environ.get("ANTHROPIC_DEFAULT_HAIKU_MODEL")
+        or os.environ.get("ANTHROPIC_MODEL")
     )
+    # 通道：命令行 > ANTHROPIC_BASE_URL
+    base_url = sys.argv[4] if len(sys.argv) > 4 else os.environ.get("ANTHROPIC_BASE_URL")
+
+    # 认证：AUTH_TOKEN（Bearer）优先，fallback 到 API_KEY（x-api-key）
+    auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN")
     api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        print("缺少 ANTHROPIC_API_KEY 环境变量", file=sys.stderr)
+    if auth_token:
+        auth_headers = {"Authorization": f"Bearer {auth_token}"}
+    elif api_key:
+        auth_headers = {"x-api-key": api_key}
+    else:
+        print("缺少 ANTHROPIC_AUTH_TOKEN 或 ANTHROPIC_API_KEY 环境变量", file=sys.stderr)
         sys.exit(1)
 
-    text = load_text(src)
+    if not model:
+        print("未指定模型：请设 ANTHROPIC_DEFAULT_HAIKU_MODEL 或用命令行参数传入", file=sys.stderr)
+        sys.exit(1)
+    if not base_url:
+        print("未指定通道：请设 ANTHROPIC_BASE_URL 或用命令行参数传入", file=sys.stderr)
+        sys.exit(1)
+
+    text = strip_flags(load_text(src))
     chunks = split_chunks(text)
     total = len(chunks)
-    print(f"共 {total} 块，每块约 {CHUNK_CHARS} 字，模型 {model}")
+    print(f"共 {total} 块，每块约 {CHUNK_CHARS} 字，模型 {model}，通道 {base_url}")
 
     # 断点续传：从 progress 文件读取已完成块数
     progress_path = out + ".progress"
@@ -168,10 +193,9 @@ def main():
         for i in range(done, total):
             chunk = chunks[i]
             print(f"[{i + 1}/{total}] 翻译中…（{len(chunk)} 字）", flush=True)
-            translated = translate_chunk(chunk, model, base_url, api_key).strip()
+            translated = translate_chunk(chunk, model, base_url, auth_headers).strip()
             f.write(translated + "\n\n")
             f.flush()
-            # 每完成一块就记录进度，中断可续
             open(progress_path, "w").write(str(i + 1))
     finally:
         f.close()
