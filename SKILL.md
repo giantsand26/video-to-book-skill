@@ -28,7 +28,7 @@ description: 把视频/链接转成可阅读的文档（markdown + EPUB），存
 - 转写仍可用现有 faster-whisper small/int8。先对短样本测量耗时和质量，再决定模型、beam 或并行度；Apple Silicon 的 faster-whisper CPU 路径不能当作 Metal 加速。不要在同一 CPU 上盲目启动多个重模型。降低模型大小须以样本质量为依据。
 - 分组后优先使用 `batch_text.py` 代替旧 `translate.py`。旧脚本会剥离时间戳，其块数断点不验证输入，不能用于要求逐段对应的成品。
 - `python3 scripts/batch_text.py prepare grouped.txt work/batches --mode translate [--glossary glossary.txt]`：生成最多12段、目标3000字符的 JSON 请求；单个超长段保留完整，必要时先人工细分源段再创建新的工作目录。
-- 只读取 `work/batches/pending.json` 中列出的请求；旧请求文件是历史记录。每个工作单元仅接收该请求的短指令、术语表和记录，不重复加载全篇、skill 或历史。**批请求必须串行处理，每批之间 `sleep 3~5s`，绝不并发**——并发会触发限流→反复重试→token 膨胀数倍，这是最大的浪费源；缺少 API 时可由当前会话直接处理 JSON。
+- 只读取 `work/batches/pending.json` 中列出的请求；旧请求文件是历史记录。每个工作单元仅接收该请求的短指令、术语表和记录，不重复加载全篇、skill 或历史。**批请求用 `python3 scripts/run_batches.py work/batches --sleep 4` 串行执行，绝不并发**——并发会触发限流→反复重试→token 膨胀数倍，这是最大的浪费源；缺少 API 时可由当前会话直接处理 JSON。
 - 返回 JSON 数组后：`python3 scripts/batch_text.py accept work/batches result.json`。程序按 ID、时间戳和非空正文接受结果并缓存，重新生成仅含未完成记录的请求。串行接受结果，避免同时修改状态文件。连续两次失败的段落交当前会话校订或报告具体阻碍，不无限重试全文。
 - `python3 scripts/batch_text.py finish work/batches translated.txt`：缺一段就拒绝生成，全部通过才按原顺序原子写入。输入或术语表变化会拒绝复用旧状态；重新执行相同 prepare 可安全续跑。译文仍须抽查语义，ID 一致不代表没有内容错位。
 - 中文先用 `--mode polish` 标出长段缺标点和重复异常，只把这些段交模型；规则不能证明其余段落合格。抽查开头、中间、结尾以及专名密集段。若普遍不通顺，或用户要求全篇校订，使用新工作目录加 `--all`，不能凭标点数量宣布校订完成。禁止按固定字数盲目插入句号、按通用字典替换人名。
@@ -40,13 +40,13 @@ description: 把视频/链接转成可阅读的文档（markdown + EPUB），存
 
 翻译/校订是「输入输出等长」的任务，正文 token 是硬成本省不掉，但流程浪费可省 70%。务必遵守：
 
-- **读全文只一次，边读边产出 layout**：读 `grouped.txt`/转写结果一次，同时产出三样并落盘成 `layout.json`：①章节边界（时间戳→`##` 标题）②问答环节说话人映射（段id→说话人）③专名表 glossary。之后分节、说话人标注、组装一律用 `layout.json`，**禁止重读全文**。
-- **校订/翻译串行、绝不并发**：每个批请求串行处理，批间 `sleep 3~5s`。限流是重试的唯一根因，串行 + 冷却从根上避开（并发曾把 18 次理想调用膨胀成约 100 次）。
+- **读全文只一次**：把 `grouped.txt`/转写结果一次性读完进上下文，然后**分多次输出** `layout.json`（先出章节边界，再出说话人映射和 glossary），不重读全文。不要把「章节划分」和「说话人追踪」挤进同一次输出——三种注意力模式混在一次 pass 里易顾此失彼，说话人映射最易降质。之后分节、说话人标注、组装一律用 `layout.json`。
+- **校订/翻译用 `run_batches.py` 串行执行，绝不并发**：`python3 scripts/run_batches.py work/batches --sleep 4`。串行 + 每批间冷却从根上避开限流（并发曾把 18 次理想调用膨胀成约 100 次）；脚本内建指数退避与「只补缺失段」循环，不要手动并发或绕过它。
 - **失败只补缺失段，不整批重发**：`accept` 后程序自动重新生成「仅含未完成记录」的请求，只处理 `pending.json` 里列出的；连续两次失败的段交当前会话补。指数退避 5s→10s→20s。
 - **finish 直接组装成稿**：`finish` 输出后用 `layout.json` 直接拼最终 markdown，不再重读全文、不再单独跑一遍组装。
-- **精简输出格式**：模型输出用纯文本 `#id|text`（或仅 `text`，靠顺序对应）替代 JSON 对象，省掉 id/timestamp 字段的结构开销；配套一个轻量解析器。
+- **精简输出格式**：模型输出用纯文本 `#id|text` 替代 JSON 对象，省掉 JSON 括号和 timestamp 字段的结构开销。**必须保留 `#id` 锚点**——`accept` 靠 id+timestamp 双校验拒绝错位段，退化成「仅 text 靠顺序对应」会毁掉这道安全网；配套一个轻量解析器。
 - **精简 prompt + 按需 glossary**：system prompt 只留硬约束（忠实逐句、保留口吻、不改原意），去掉客套话；glossary 只传本批实际出现的专名，不整张传。
-- **分级校订 + 质量门**：中文先校订约 10% 小样本（开头/中间/结尾 + 专名密集段）。错字率约 >10% 则全篇 `--all`；否则只校订规则标出的脏段 + 抽查。同音错字规则检测不到，必须靠样本判断，不能凭标点数量宣布「干净」。
+- **中文默认全篇校订（`--all`），不默认只修脏段**：Whisper 中文的逗号切句、缺标点、近音错字普遍存在且规则检测不到，默认直接全篇捋顺。只有抽样（分层：开头/中间/结尾 + 专名密集段 + 低音质段）显示近乎干净时，才跳过全篇。错字聚集分布，10% 小样本极易漏掉重灾区，不能凭标点数量或小样本抽样宣布「干净」。
 
 1. **判断字幕与元数据**：用 baoyu-youtube-transcript 的 `--list`，或 `yt-dlp --list-subs`。同时 `yt-dlp --print "%(title)s ||| %(channel)s ||| %(duration)s秒 ||| %(upload_date)s"` 拿标题/频道/时长/日期。
 2. **有字幕**：优先抓 `zh` / `zh-Hans`；只有英文（或 en-US 误判）时抓英文再翻译成简体中文。
@@ -87,6 +87,7 @@ description: 把视频/链接转成可阅读的文档（markdown + EPUB），存
 ## 脚本（本 skill 的 scripts/ 目录下）
 
 - `batch_text.py prepare|accept|finish` —— 默认处理入口：结构化小批次、逐 ID 缓存、输入变更检测、只补失败段落、完整性检查。无额外依赖和模型调用；`--help` 查看参数。
+- `run_batches.py <workdir> [--sleep 4] [--max-retry 5] [--glossary FILE]` —— 串行执行批请求：逐批调 API（绝不并发）、批间冷却、失败指数退避、自动 accept 循环只补缺失段。依赖与 `translate.py` 相同的环境变量。
 
 - `transcribe.py <audio.mp3> <transcript.json> [language]` —— faster-whisper small / int8 / beam5 / vad；第三个参数指定语言，缺省 `zh`（中文带简体断句提示词），传 `en` 等其他语言码则按该语言转写。
 - `translate.py <transcript.json|grouped.txt> <输出.md> [model] [base_url]` —— 分块忠实翻译为简体中文（模型/通道自动跟随环境变量，块间不共享上下文、流式写文件、断点续传、失败切半重试、剥离国旗 emoji 规避内容风控），把翻译从 agent 上下文剥离以省 token。读 `ANTHROPIC_AUTH_TOKEN`（或 `ANTHROPIC_API_KEY`）、`ANTHROPIC_DEFAULT_HAIKU_MODEL`、`ANTHROPIC_BASE_URL`；`CHUNK_CHARS` 控制单块字符数。
